@@ -1,4 +1,4 @@
 FROM node:alpine
 WORKDIR /app
-COPY honeypot.json .
+COPY honeypot.js .
 ENTRYPOINT [ "node", "honeypot.js" ]
