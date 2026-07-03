@@ -19,7 +19,7 @@ Threat intelligence is extracted directly from the container logs or the generat
 1.	Log into AWS Console -> EC2 -> Launch Instance.
 2.	OS: Ubuntu 24.04 LTS.
 3.	Instance Type: t2.micro.
-4.	Key Pair: Select existing kharghar-server-key.
+4.	Key Pair: Select existing xyz-server-key.
 5.	Network / Security Group:
    	Rule 1: SSH | Port 22 | Source: My IP (Admin Access).
    	Rule 2: Custom TCP | Port 2222 | Source: Anywhere - 0.0.0.0/0 (Honeypot Trap).
@@ -28,9 +28,9 @@ Threat intelligence is extracted directly from the container logs or the generat
 ### Phase 2: Perimeter Access
 1.	Open local Ubuntu WSL terminal.
 2.	Ensure the private key has strict permissions (only required once per machine):
-chmod 400 ~/.ssh/kharghar-server-key.pem
+chmod 400 ~/.ssh/xyz-server-key.pem
 3.	Establish the secure tunnel:
-ssh -i ~/.ssh/kharghar-server-key.pem ubuntu@<NEW_AWS_PUBLIC_IP>
+ssh -i ~/.ssh/xyz-server-key.pem ubuntu@<NEW_AWS_PUBLIC_IP>
 
 ### Phase 3: Server Prep & Deployment
 1.	Update package manager and install dependencies:
