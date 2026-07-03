@@ -19,7 +19,7 @@ Threat intelligence is extracted directly from the container logs or the generat
 1.	Log into AWS Console -> EC2 -> Launch Instance.
 2.	OS: Ubuntu 24.04 LTS.
 3.	Instance Type: t2.micro.
-4.	Key Pair: Select existing xyz-server-key.
+4.	Key Pair: Select existing xyz-server-key. (If the key pair does not  exist, then click on create new key pair )
 5.	Network / Security Group:
    	Rule 1: SSH | Port 22 | Source: My IP (Admin Access).
    	Rule 2: Custom TCP | Port 2222 | Source: Anywhere - 0.0.0.0/0 (Honeypot Trap).
