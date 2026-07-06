@@ -1,20 +1,26 @@
 const net = require('net');
 const fs = require('fs'); // Native Node module for reading/writing files
+const path = require('path');
 
 const PORT = 2222; // We use 2222 as our fake SSH port
+const LOG_PATH = path.join(__dirname, 'logs', 'threat-logs.txt');
 
 // Create the trap server
 const server = net.createServer((socket) => {
-    // 1. Grab the IP address of whoever just connected
-    const attackerIP = socket.remoteAddress;
+    // 1. Grab the IP address of whoever just connected and clean IPv4-mapped IPv6 addresses
+    let attackerIP = socket.remoteAddress;
+    if (attackerIP && attackerIP.startsWith('::ffff:')) {
+        attackerIP = attackerIP.slice(7);
+    }
+    
     const timestamp = new Date().toISOString();
     const logEntry = `[${timestamp}] Unauthorized access attempt from: ${attackerIP}\n`;
 
     // 2. Print it to our terminal so we can watch it live
     console.log(logEntry.trim());
 
-    // 3. Save it permanently to a text file
-    fs.appendFile('threat-logs.txt', logEntry, (err) => {
+    // 3. Save it permanently to a text file using the absolute path
+    fs.appendFile(LOG_PATH, logEntry, (err) => {
         if (err) console.log("Failed to save log.");
     });
 
