@@ -1,101 +1,141 @@
-# Architecture Overview
-This project utilizes a lightweight, containerized approach to capture unauthorized access attempts using a simulated SSH service.
+# SSH Honeypot on AWS EC2
 
-## Cloud Infrastructure
-Hosted on an AWS EC2 t2.micro instance running Ubuntu 24.04 LTS. Security groups are configured to strictly limit administrative SSH (Port 22) to a dedicated IP address, while leaving the honeypot listener (Port 2222) open to the public internet. To maintain operational efficiency, the instance utilizes a Stop/Start lifecycle rather than full termination, preserving the compiled architecture and threat data on the EBS volume between sessions.
+A small Node.js TCP server that pretends to be an SSH login prompt, logs whoever connects, and keeps that log even if the container gets rebuilt or the box reboots.
 
-## Containerization 
-The environment is isolated using Docker. It is built upon a minimal node:alpine image and runs in detached mode, safely mapping the exposed port 2222 from the host into the container. Crucially, the container utilizes a bind-mount volume (-v) to decouple the application code from the data layer. This bridges the container's internal log directory directly to the Ubuntu host filesystem, ensuring log data persists even if the container crashes or is rebuilt.
+This README describes what the project actually does right now, not what it might do someday. Anything not built yet is listed at the bottom under Known Gaps instead of being dressed up as done.
 
-## Application Logic 
-A custom Node.js TCP server acts as the trap. When an automated scanner or attacker connects to port 2222, the application sanitizes the network data by stripping IPv4-mapped IPv6 prefixes (::ffff:). It captures the clean IP address, appends a standardized ISO timestamp, and writes it to disk using robust absolute pathing to prevent directory resolution errors. The script then serves a fake Ubuntu login banner to stall the attacker before aggressively terminating the connection after two seconds to conserve server memory and prevent resource exhaustion.
+## What it does
 
-## Data Extraction 
-Because the system utilizes a persistent volume mount, threat intelligence is extracted directly from the host machine rather than bridging into the container. Administrators can natively parse, sort, and identify the most frequent offending IP addresses by reading the threat-logs.txt file directly from their home directory using standard Linux utilities like cat, grep, and tail. 
+The server listens on port 2222. When anything connects, it:
 
-## Deployment Runbook
+1. Grabs the connecting IP address and strips the `::ffff:` prefix that shows up on dual-stack listeners, so you get a clean IPv4 address in the log instead of a mangled one.
+2. Logs the IP and a timestamp to `threat-logs.txt`.
+3. Sends back a fake Ubuntu login banner to make it look like a real machine for a couple seconds.
+4. Closes the connection after 2 seconds so it doesn't sit there using memory.
 
-### Phase 1: AWS Infrastructure Provisioning
-1.	Log into AWS Management Console -> EC2 Dashboard -> Launch Instance.
-2.	Base Image (AMI) -> OS: Ubuntu 24.04 LTS.
-3.	Compute Tier (Instance Type) : t2.micro.
-4.	Key Pair: Assign your pre-configured administrative key pair
-5.	Perimeter Firewalls (Security Groups): Configure the network stack 	with the following inbound rules:
-   	Rule 1 (Admin Management): SSH | Port 22 | Source: My IP (Administrative Access).
-   	Rule 2 (Public Intake): Custom TCP | Port 2222 | Source: Anywhere - 0.0.0.0/0 (Honeypot Trap).
-6.	Click Launch. Copy the new Public IPv4 Address.
+That's it. It doesn't accept a fake password, doesn't run a fake shell, and doesn't capture usernames typed after the login prompt. It's a connection logger with a believable front door, not a full interactive trap.
 
-### Phase 2: Perimeter Access / Edge Connectivity
-1.	Launch your local WSL environment or native Linux terminal.
-2.	Ensure the private key has strict permissions (only required once per machine):
+## Why the logs survive container restarts
+
+Containers are throwaway by design. Anything written to a container's own filesystem disappears when the container is removed. To avoid losing data every time the app gets rebuilt or redeployed, the log file lives outside the container, on the host, and gets mounted in:
+
 ```bash
-chmod 400 ~/.ssh/xyz-server-key.pem
-```
-3.	Establish an authenticated SSH management session to the cloud infrastructure:
-```bash
-ssh -i ~/.ssh/xyz-server-key.pem ubuntu@<NEW_AWS_PUBLIC_IP>
+-v $HOME/honeypot-logs:/app/logs
 ```
 
-### Phase 3: Insfrastructure Provisioning & Deployment
-1.	Synchronize local package indexes and provision core containerization and version control tooling:
+The app writes to an absolute path (`/app/logs/threat-logs.txt`) that matches this mount, not a relative path that depends on whatever the working directory happens to be at runtime.
+
+## Why it doesn't run as root
+
+The container drops root privileges and runs as the built-in `node` user (UID 1000) from the `node:alpine` image, via `USER node` in the Dockerfile. A process that's intentionally sitting open to the entire internet shouldn't also have root inside its own container. If something ever goes wrong in this code, or gets extended to parse more of what an attacker sends, root-in-container turns a small bug into a much bigger one.
+
+One consequence of this that isn't obvious until you hit it: the host directory being mounted in has to be writable by UID 1000, not just by root. If you ever recreate the log directory or move it, run:
+
 ```bash
+sudo chown -R 1000:1000 ~/honeypot-logs
+```
+
+If you skip this, the app won't crash, it'll just silently fail every write and print `Failed to save log.` to `docker logs` while the container looks perfectly healthy. This bit us once during setup and is the single easiest way to think this is working when it isn't.
+
+## Deployment
+
+### 1. Launch the EC2 instance
+
+- Ubuntu 24.04 LTS, t2.micro
+- Security group inbound rules:
+  - Port 22 (SSH), source: your IP only
+  - Port 2222 (honeypot), source: anywhere
+
+### 2. Connect and prep the server
+
+```bash
+ssh -i ~/.ssh/your-key.pem ubuntu@<PUBLIC_IP>
 sudo apt update && sudo apt install docker.io git -y
 ```
-2.	Clone the project repository directly onto the cloud instance filesystem and step into the project root:
+
+Add your user to the `docker` group so you don't need `sudo` for every docker command:
+
 ```bash
-git clone <YOUR_GITHUB_REPO_URL>
-cd Cloud-Deployed-Threat-Intelligence-Sensor
+sudo usermod -aG docker ubuntu
 ```
 
-3.	Compile the container configuration blueprint into a local, immutable Docker image:
+Log out and back in for that to take effect, then confirm with `groups` — you should see `docker` in the list.
+
+### 3. Get the code and build
+
 ```bash
-sudo docker build -t threat-honeypot .
+git clone <YOUR_REPO_URL>
+cd <project-folder>
+docker build -t threat-honeypot .
 ```
 
-4.	Instantiate the containerized process with integrated network binding and continuous log volume mapping:
+### 4. Run it
+
 ```bash
-sudo docker run -d --name live-trap -p 2222:2222 -v $HOME/honeypot-logs:/app/logs threat-honeypot
+mkdir -p ~/honeypot-logs
+docker run -d --name live-trap --restart unless-stopped \
+  -p 2222:2222 \
+  -v $HOME/honeypot-logs:/app/logs \
+  threat-honeypot
 ```
 
-### Phase 4: Telemetry Aggregation & Data Analysis
-1.	Verify that the core engine is up, functional, and actively listening for network connections:
+`--restart unless-stopped` means the container comes back on its own if the instance reboots unexpectedly, without needing you to manually `docker start` it.
+
+### 5. Verify it's actually working
+
+Don't trust that it's fine just because `docker ps` shows it running. Actually check:
+
 ```bash
-sudo docker logs live-trap
+docker logs live-trap
 ```
-2.	Because data layers are bind-mounted directly to the host machine workspace (~/honeypot-logs), you do not need to drop into the container to review telemetry. Analyze, filter, and aggregate malicious threat vectors using native host strings:
+
+Look for `Failed to save log.` — if you see it, it's a permissions problem (see above). If it's clean, trigger a real connection from a different network than the server itself is on, then confirm the log actually grew:
+
+```bash
+nc <PUBLIC_IP> 2222
+cat ~/honeypot-logs/threat-logs.txt
+```
+
+## Reading the logs
+
+Most frequent attacker IPs:
+
 ```bash
 cat ~/honeypot-logs/threat-logs.txt | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" | sort | uniq -c | sort -nr
 ```
-3. To monitor incoming threat attacks live as they hit the network perimeter interface, stream the file descriptor output directly:
+
+Watch it live:
+
 ```bash
 tail -f ~/honeypot-logs/threat-logs.txt
 ```
-4.  If your ultimate goal is to copy that log file from the cloud server down to your local machine for offline analysis, you don't use cat. You use Secure Copy (scp) from your local linux terminal:
+
+Pull it to your local machine:
+
 ```bash
-scp -i ~/.ssh/xyz-server-key.pem ubuntu@<YOUR_AWS_PUBLIC_IP>:~/honeypot-logs/threat-logs.txt ~/honeypot-logs/
+scp -i ~/.ssh/your-key.pem ubuntu@<PUBLIC_IP>:~/honeypot-logs/threat-logs.txt ./
 ```
 
- ## System Maintenance Cycle (Next-DayLifecycle Procedure)
-To keep costs low while maintaining architecture state, follow this cycle instead of destroying your virtual machine assets completely.
+## Stopping and starting to save cost
 
-### Lifecycle Start Routine (When resuming development)
-1. Log into your AWS Management Console, select your stopped honeypot instance, and change the instance state to Start.
+Stopping the instance instead of terminating it keeps the disk, the docker setup, and the logs intact for less than a dollar a month in storage.
 
-2. Network Alignment: Because public cloud IP addresses cycle on boot, copy the brand new Public IPv4 Address from your console interface.
+Because EC2 gives you a new public IP on every stop/start by default, you currently have to update your security group's SSH rule and re-copy the new IP every time you restart the box. An Elastic IP would remove this step entirely — this hasn't been set up yet, see Known Gaps.
 
-3. Firewall Update: Navigate to Security Groups, select your project group, and edit inbound rules. Update Rule 1 (Port 22) to your current My IP location to maintain administrative tunnel access.
+When resuming:
 
-4. Tunnel back into the cloud instance:
 ```bash
-ssh -i ~/.ssh/xyz-server-key.pem ubuntu@<NEW_AWS_PUBLIC_IP>
+# on AWS console: start the instance, note the new public IP if no Elastic IP is attached
+ssh -i ~/.ssh/your-key.pem ubuntu@<NEW_PUBLIC_IP>
+docker start live-trap
 ```
-5. Re-initialize your pre-configured, data-mapped engine container without building any assets from scratch:
-```bash
-sudo docker start live-trap
-```
-### Lifecycle Standby Routine (When finishing your work shift)
-1. Exit your active SSH tunnel terminal interface.
 
-2. Log into your AWS Management Console, locate your instance, and select Stop Instance.
+## Known gaps
 
-3. Note: The system stops generating compute costs, while your underlying configuration, Docker environments, code, and threat telemetry profiles remain securely written to persistent disk for less than $1.00 USD per month.
+Being upfront about what's not done, instead of implying it is:
+
+- **No Elastic IP.** The public IP changes on every restart, which means manually updating the security group each time. A five-minute fix that just hasn't been done yet.
+- **No Infrastructure as Code.** The whole EC2 setup above is manual console clicking. If this instance died right now, rebuilding it means redoing every step by hand from memory. Terraform for this is the next planned piece of work, not yet started.
+- **No CI/CD or image scanning.** Nothing checks this Docker image for known vulnerabilities before it gets deployed.
+- **Minimal interaction.** It logs a connection and an IP, nothing about attempted usernames or passwords, which is where a lot of the more interesting attacker behavior data would come from.
+- **Single log file, no rotation.** `threat-logs.txt` grows forever with no size limit or rotation policy.
