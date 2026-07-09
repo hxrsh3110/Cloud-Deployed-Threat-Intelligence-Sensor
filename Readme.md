@@ -27,7 +27,7 @@ The app writes to an absolute path (`/app/logs/threat-logs.txt`) that matches th
 
 ## Why it doesn't run as root
 
-The container drops root privileges and runs as the built-in `node` user (UID 1000) from the `node:alpine` image, via `USER node` in the Dockerfile. A process that's intentionally sitting open to the entire internet shouldn't also have root inside its own container. If something ever goes wrong in this code, or gets extended to parse more of what an attacker sends, root-in-container turns a small bug into a much bigger one.
+The container drops root privileges and runs as the built-in `node` user (UID 1000) from the `node:20-alpine` image, via `USER node` in the Dockerfile. A process that's intentionally sitting open to the entire internet shouldn't also have root inside its own container. If something ever goes wrong in this code, or gets extended to parse more of what an attacker sends, root-in-container turns a small bug into a much bigger one.
 
 One consequence of this that isn't obvious until you hit it: the host directory being mounted in has to be writable by UID 1000, not just by root. If you ever recreate the log directory or move it, run:
 
@@ -36,6 +36,18 @@ sudo chown -R 1000:1000 ~/honeypot-logs
 ```
 
 If you skip this, the app won't crash, it'll just silently fail every write and print `Failed to save log.` to `docker logs` while the container looks perfectly healthy. This bit us once during setup and is the single easiest way to think this is working when it isn't.
+
+## Image hardening
+
+The base image is pinned to `node:20-alpine` instead of the floating `node:alpine` tag, so a rebuild months from now starts from the same major version instead of whatever "latest" happens to mean by then.
+
+The image also strips out `npm`, `npx`, `corepack`, and `yarn` at build time. The app has zero dependencies, it only uses Node's built-in `net`, `fs`, and `path` modules, so none of that tooling is ever invoked at runtime, it's just dead weight bundled into the base image by default. Removing it isn't just cosmetic, a CI scan flagged 12 real CVEs living inside npm's own internal dependencies, none of them reachable by this app, but rather than exclude them from the scan, they're just not in the image anymore. The build also explicitly upgrades `libssl3`/`libcrypto3` at build time to pull in the current patched versions from Alpine's package repo, since a real OpenSSL CVE was flagged in the base OS layer on the first scan.
+
+## CI: automated build and vulnerability scan
+
+Every push to `main` triggers a GitHub Actions workflow (`.github/workflows/docker-scan.yml`) that builds the Docker image and scans it with [Trivy](https://trivy.dev). If it finds a CRITICAL or HIGH severity vulnerability, the workflow fails outright, it's a gate, not a report nobody reads.
+
+Worth being clear about what this does and doesn't cover: it only runs when code gets pushed to GitHub. It does not run continuously against the live instance, and it does not auto-deploy anything, the rebuild and redeploy on the server is still a manual step. Its actual value shows up the next time a change gets pushed and the base image has moved on since the last build, new CVEs get caught before they ship, instead of an old, silently-stale image just running forever because nothing ever prompted a re-check.
 
 ## Monitoring
 
@@ -123,21 +135,40 @@ Pull it to your local machine:
 scp -i ~/.ssh/your-key.pem ubuntu@<PUBLIC_IP>:~/honeypot-logs/threat-logs.txt ./
 ```
 
-## Stopping and starting to save cost
+## Pausing and resuming the project
 
 Stopping the instance instead of terminating it keeps the disk, the docker setup, and the logs intact for less than a dollar a month in storage. With the Elastic IP attached, the public address doesn't change across a stop/start, so there's no need to touch the security group or look up a new IP each time.
 
-When resuming:
+**To pause:**
+
+```bash
+docker stop live-trap
+# then stop the instance from the AWS console
+```
+
+Nothing else needs to change. The Elastic IP stays allocated and attached while stopped, monitoring doesn't need to be touched, it'll just go quiet since nothing's running.
+
+**To resume**, pull the latest code before rebuilding rather than assuming what's on the server is current, especially if time has passed. This is the actual point of having CI in place, the next build pulls a fresh base image and gets scanned properly, instead of trusting an old image that hasn't been checked since it was last built:
 
 ```bash
 # on AWS console: start the instance
 ssh -i ~/.ssh/your-key.pem ubuntu@<ELASTIC_IP>
+cd ~/Cloud-Deployed-Threat-Intelligence-Sensor
+git pull origin main
+docker build -t threat-honeypot .
+docker stop live-trap && docker rm live-trap
+docker run -d --name live-trap --restart unless-stopped \
+  -p 2222:2222 \
+  -v $HOME/honeypot-logs:/app/logs \
+  threat-honeypot
 ```
 
-The container comes back on its own thanks to `--restart unless-stopped`, but if you ever need to start it manually:
+Then verify, same as any deployment, don't just assume it's fine because nothing errored:
 
 ```bash
-docker start live-trap
+docker logs live-trap
+nc <ELASTIC_IP> 2222
+tail -1 ~/honeypot-logs/threat-logs.txt
 ```
 
 ## Known gaps
@@ -145,6 +176,6 @@ docker start live-trap
 Being upfront about what's not done, instead of implying it is:
 
 - **No Infrastructure as Code.** The whole EC2 setup above is manual console clicking. If this instance died right now, rebuilding it means redoing every step by hand from memory. Terraform for this is the next planned piece of work, not yet started.
-- **No CI/CD or image scanning.** Nothing checks this Docker image for known vulnerabilities before it gets deployed. Planned next.
+- **CI builds and scans, but doesn't deploy.** The pipeline catches vulnerabilities before they'd ship, but getting the fixed image onto the actual running instance is still a manual step.
 - **Minimal interaction.** It logs a connection and an IP, nothing about attempted usernames or passwords, which is where a lot of the more interesting attacker behavior data would come from.
 - **Monitoring has a real blind spot.** The health check relies on cron running at all. If cron itself dies, or the whole instance goes down, the healthchecks.io grace window still catches it eventually because silence itself is the alert condition, but there's no independent check confirming cron is alive day to day.
