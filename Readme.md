@@ -9,11 +9,14 @@ This README describes what the project actually does right now, not what it migh
 The server listens on port 2222. When anything connects, it:
 
 1. Grabs the connecting IP address and strips the `::ffff:` prefix that shows up on dual-stack listeners, so you get a clean IPv4 address in the log instead of a mangled one.
-2. Logs the IP and a timestamp to `threat-logs.txt`.
-3. Sends back a fake Ubuntu login banner to make it look like a real machine for a couple seconds.
-4. Closes the connection after 2 seconds so it doesn't sit there using memory.
+2. Sends back a fake Ubuntu login banner and a `login:` prompt.
+3. Waits for the attacker to type a username, then prompts for a password, and waits for that too. Both fields are sanitized (control characters stripped, length capped) before anything gets logged.
+4. Logs the IP, username, password, and a status (`complete` if both fields came through, `timeout` if the connection sat idle past 15 seconds without finishing) to `threat-logs.txt`.
+5. Sends a fake "Login incorrect" and closes the connection.
 
-That's it. It doesn't accept a fake password, doesn't run a fake shell, and doesn't capture usernames typed after the login prompt. It's a connection logger with a believable front door, not a full interactive trap.
+Earlier versions of this project logged only the connecting IP and disconnected after a fixed 2 seconds, before an attacker could type anything. That's no longer the case, this now captures the actual credentials being attempted, which is where the more interesting behavioral data (common default logins, credential-stuffing patterns) actually comes from. It still doesn't run a fake shell or accept further commands after the password prompt, so it's a credential-capturing front door, not a full interactive trap like Cowrie.
+
+One thing worth knowing if you're reading the raw log file: entries logged before this update use the old plain format (`Unauthorized access attempt from: <ip>`), entries after use the new `IP | Username | Password | Status` format. The `grep`-based IP extraction below works on both since it just matches IP patterns regardless of the rest of the line, but anything that parses the full line structure needs to account for the format change.
 
 ## Why the logs survive container restarts
 
@@ -187,5 +190,5 @@ Being upfront about what's not done, instead of implying it is:
 
 - **Terraform covers AWS resources, not what runs inside them.** The security group, instance, and Elastic IP are in code and verified against reality. Installing Docker, cloning the repo, and building the container on a fresh instance is still manual, not yet a `user_data` script or otherwise automated.
 - **CI builds and scans, but doesn't deploy.** The pipeline catches vulnerabilities before they'd ship, but getting the fixed image onto the actual running instance is still a manual step.
-- **Minimal interaction.** It logs a connection and an IP, nothing about attempted usernames or passwords, which is where a lot of the more interesting attacker behavior data would come from.
+- **No fake shell after login.** Credentials are captured, but the connection ends right after, there's no simulated filesystem or command interpreter to see what an attacker would try next if they thought they were in.
 - **Monitoring has a real blind spot.** The health check relies on cron running at all. If cron itself dies, or the whole instance goes down, the healthchecks.io grace window still catches it eventually because silence itself is the alert condition, but there's no independent check confirming cron is alive day to day.
