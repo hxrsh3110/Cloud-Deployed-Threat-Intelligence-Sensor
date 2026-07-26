@@ -32,3 +32,17 @@ docker run -d --name live-trap --restart unless-stopped \
 # (adjust this if health-check.sh isn't at repo root)
 chmod +x /home/ubuntu/Cloud-Deployed-Threat-Intelligence-Sensor/health-check.sh
 (crontab -l -u ubuntu 2>/dev/null; echo "*/5 * * * * /home/ubuntu/Cloud-Deployed-Threat-Intelligence-Sensor/health-check.sh") | crontab -u ubuntu -
+
+# --- Give ssm-user group access to ubuntu's files and docker, so SSM sessions don't need sudo for routine work ---
+for i in {1..12}; do
+  if id ssm-user &>/dev/null; then
+    usermod -aG ubuntu,docker ssm-user
+    break
+  fi
+  sleep 5
+done
+chmod -R g+rwX /home/ubuntu/Cloud-Deployed-Threat-Intelligence-Sensor
+find /home/ubuntu/Cloud-Deployed-Threat-Intelligence-Sensor -type d -exec chmod g+s {} \;
+chmod -R g+rwX /home/ubuntu/honeypot-logs
+find /home/ubuntu/honeypot-logs -type d -exec chmod g+s {} \;
+sudo -u ssm-user git config --global --add safe.directory /home/ubuntu/Cloud-Deployed-Threat-Intelligence-Sensor
