@@ -18,6 +18,7 @@ chown -R 1000:1000 /home/ubuntu/honeypot-logs
 # --- Clone and build ---
 cd /home/ubuntu
 git clone https://github.com/hxrsh3110/Cloud-Deployed-Threat-Intelligence-Sensor.git
+chown -R ubuntu:ubuntu /home/ubuntu/Cloud-Deployed-Threat-Intelligence-Sensor
 cd Cloud-Deployed-Threat-Intelligence-Sensor
 docker build -t threat-honeypot .
 
