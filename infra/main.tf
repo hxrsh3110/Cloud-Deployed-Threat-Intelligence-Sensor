@@ -35,6 +35,9 @@ resource "aws_instance" "honeypot" {
   key_name               = "kharghar-server-key"
   vpc_security_group_ids = [aws_security_group.honeypot_sg.id]
 
+  user_data                   = file("${path.module}/user_data.sh")
+  user_data_replace_on_change = true
+
   tags = {
     Name = "honeypot"
   }
