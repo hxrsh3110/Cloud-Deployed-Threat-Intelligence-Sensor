@@ -66,3 +66,38 @@ resource "aws_iam_instance_profile" "ssm_profile" {
   name = "honeypot-ssm-profile"
   role = aws_iam_role.ssm_role.name
 }
+
+# --- S3 log shipping ---
+
+resource "aws_s3_bucket" "honeypot_logs" {
+  bucket = "honeypot-logs-hxrsh3110-eu-north-1"
+}
+
+resource "aws_s3_bucket_versioning" "honeypot_logs" {
+  bucket = aws_s3_bucket.honeypot_logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "honeypot_logs" {
+  bucket                  = aws_s3_bucket.honeypot_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_iam_role_policy" "s3_log_upload" {
+  name = "honeypot-s3-log-upload"
+  role = aws_iam_role.ssm_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:PutObject"]
+      Resource = "${aws_s3_bucket.honeypot_logs.arn}/*"
+    }]
+  })
+}
